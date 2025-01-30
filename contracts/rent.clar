@@ -58,3 +58,9 @@
 
 (define-read-only (get-escrow-balance (landlord principal))
     (default-to u0 (map-get? escrow-balance landlord)))
+
+
+(define-public (assign-tenant (new-tenant principal))
+    (let ((property (unwrap! (map-get? properties tx-sender) (err u103))))
+        (ok (map-set properties tx-sender 
+            (merge property { tenant: (some new-tenant) })))))
