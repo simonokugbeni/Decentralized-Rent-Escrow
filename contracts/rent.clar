@@ -167,3 +167,42 @@
                 penalty-rate: penalty-rate,
                 grace-period: grace-period
             }))))
+
+
+;; Add to Data Maps
+(define-map deposit-claims
+    principal
+    {
+        amount: uint,
+        reason: (string-ascii 256),
+        status: (string-ascii 20)
+    }
+)
+
+(define-public (claim-deposit (tenant principal) (amount uint) (reason (string-ascii 256)))
+    (let (
+        (property (unwrap! (map-get? properties tx-sender) (err u103)))
+    )
+        (if (is-eq (some tenant) (get tenant property))
+            (ok (map-set deposit-claims tx-sender
+                {
+                    amount: amount,
+                    reason: reason,
+                    status: "pending"
+                }))
+            ERR-NOT-AUTHORIZED)))
+
+
+
+;; Add to Data Maps
+(define-map landlord-properties
+    principal
+    (list 20 principal)
+)
+
+(define-public (add-property (property-id principal))
+    (let (
+        (current-properties (default-to (list) (map-get? landlord-properties tx-sender)))
+    )
+        (ok (map-set landlord-properties tx-sender
+            (unwrap-panic (as-max-len? (append current-properties property-id) u20))))))
