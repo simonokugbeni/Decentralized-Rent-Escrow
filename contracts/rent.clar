@@ -118,3 +118,52 @@
             (if (>= (len current-history) u50)
                 (unwrap-panic (as-max-len? (append current-history new-entry) u50))
                 (unwrap-panic (as-max-len? (append current-history new-entry) u50)))))))
+
+
+
+;; Add to Data Maps
+(define-map property-ratings
+    principal
+    {
+        total-score: uint,
+        num-ratings: uint,
+        average: uint
+    }
+)
+
+(define-public (rate-property (landlord principal) (score uint))
+    (let (
+        (property (unwrap! (map-get? properties landlord) (err u103)))
+        (current-rating (default-to { total-score: u0, num-ratings: u0, average: u0 } 
+                        (map-get? property-ratings landlord)))
+    )
+        (if (and (is-eq (some tx-sender) (get tenant property)) (<= score u5))
+            (ok (map-set property-ratings landlord
+                {
+                    total-score: (+ (get total-score current-rating) score),
+                    num-ratings: (+ (get num-ratings current-rating) u1),
+                    average: (/ (+ (get total-score current-rating) score) 
+                              (+ (get num-ratings current-rating) u1))
+                }))
+            ERR-NOT-AUTHORIZED)))
+
+
+
+;; Add to Properties Map
+(define-map late-payments
+    principal
+    {
+        due-date: uint,
+        penalty-rate: uint,
+        grace-period: uint
+    }
+)
+
+(define-public (set-payment-terms (due-date uint) (penalty-rate uint) (grace-period uint))
+    (let ((sender tx-sender))
+        (ok (map-set late-payments sender
+            {
+                due-date: due-date,
+                penalty-rate: penalty-rate,
+                grace-period: grace-period
+            }))))
