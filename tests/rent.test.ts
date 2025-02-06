@@ -64,3 +64,6 @@ describe("rent escrow contract", () => {
         expect(payRentCall.result).toBeOk(Cl.bool(true));
     });
 });
+
+
+// new

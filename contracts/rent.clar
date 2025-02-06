@@ -64,3 +64,57 @@
     (let ((property (unwrap! (map-get? properties tx-sender) (err u103))))
         (ok (map-set properties tx-sender 
             (merge property { tenant: (some new-tenant) })))))
+
+
+
+;; Add to Data Maps
+(define-map maintenance-requests 
+    { property: principal, request-id: uint } 
+    {
+        description: (string-ascii 256),
+        status: (string-ascii 20),
+        timestamp: uint
+    }
+)
+
+(define-data-var request-counter uint u0)
+
+;; Add Public Function
+(define-public (submit-maintenance-request (landlord principal) (description (string-ascii 256)))
+    (let (
+        (property (unwrap! (map-get? properties landlord) (err u103)))
+        (request-id (+ (var-get request-counter) u1))
+    )
+        (if (is-eq (some tx-sender) (get tenant property))
+            (begin
+                (var-set request-counter request-id)
+                (ok (map-set maintenance-requests 
+                    { property: landlord, request-id: request-id }
+                    {
+                        description: description,
+                        status: "pending",
+                        timestamp: stacks-block-height
+                    })))
+            ERR-NOT-AUTHORIZED)))
+
+
+;; Add to Data Maps
+(define-map payment-history
+    { landlord: principal, tenant: principal }
+    (list 50 {
+        amount: uint,
+        timestamp: uint
+    })
+)
+
+;; Add to pay-rent function
+(define-public (record-payment (landlord principal) (amount uint))
+    (let (
+        (current-history (default-to (list) (map-get? payment-history { landlord: landlord, tenant: tx-sender })))
+        (new-entry { amount: amount, timestamp: stacks-block-height })
+    )
+        (ok (map-set payment-history 
+            { landlord: landlord, tenant: tx-sender }
+            (if (>= (len current-history) u50)
+                (unwrap-panic (as-max-len? (append current-history new-entry) u50))
+                (unwrap-panic (as-max-len? (append current-history new-entry) u50)))))))
