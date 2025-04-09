@@ -580,3 +580,105 @@
                 (merge deduction { disputed: true })))
             ERR-NOT-AUTHORIZED)))
 
+
+
+
+(define-map insurance-policies
+    principal 
+    {
+        required: bool,
+        coverage-amount: uint,
+        expiry-date: uint,
+        insurance-provider: (string-ascii 64),
+        policy-number: (string-ascii 32),
+        verified: bool
+    }
+)
+
+(define-public (set-insurance-requirement (coverage-amount uint))
+    (let ((sender tx-sender))
+        (ok (map-set insurance-policies sender
+            {
+                required: true,
+                coverage-amount: coverage-amount,
+                expiry-date: u0,
+                insurance-provider: "",
+                policy-number: "",
+                verified: false
+            }))))
+
+(define-public (submit-insurance-proof 
+    (landlord principal)
+    (expiry-date uint)
+    (provider (string-ascii 64))
+    (policy-number (string-ascii 32)))
+    (let (
+        (property (unwrap! (map-get? properties landlord) (err u103)))
+        (insurance (unwrap! (map-get? insurance-policies landlord) (err u111)))
+    )
+        (if (is-eq (some tx-sender) (get tenant property))
+            (ok (map-set insurance-policies landlord
+                (merge insurance {
+                    expiry-date: expiry-date,
+                    insurance-provider: provider,
+                    policy-number: policy-number
+                })))
+            ERR-NOT-AUTHORIZED)))
+
+(define-read-only (get-insurance-details (property principal))
+    (map-get? insurance-policies property))
+
+
+
+(define-map maintenance-schedule
+    { property: principal, task-id: uint }
+    {
+        task-name: (string-ascii 64),
+        frequency: uint,
+        last-completed: uint,
+        next-due: uint,
+        assigned-to: principal,
+        status: (string-ascii 20)
+    }
+)
+
+(define-data-var task-counter uint u0)
+
+(define-public (schedule-maintenance-task 
+    (task-name (string-ascii 64))
+    (frequency uint)
+    (assigned-to principal))
+    (let (
+        (task-id (+ (var-get task-counter) u1))
+        (current-height stacks-block-height)
+    )
+        (begin
+            (var-set task-counter task-id)
+            (ok (map-set maintenance-schedule
+                { property: tx-sender, task-id: task-id }
+                {
+                    task-name: task-name,
+                    frequency: frequency,
+                    last-completed: current-height,
+                    next-due: (+ current-height frequency),
+                    assigned-to: assigned-to,
+                    status: "scheduled"
+                })))))
+
+(define-public (complete-maintenance-task (property principal) (task-id uint))
+    (let (
+        (task (unwrap! (map-get? maintenance-schedule { property: property, task-id: task-id }) (err u112)))
+        (current-height stacks-block-height)
+    )
+        (if (is-eq tx-sender (get assigned-to task))
+            (ok (map-set maintenance-schedule
+                { property: property, task-id: task-id }
+                (merge task {
+                    last-completed: current-height,
+                    next-due: (+ current-height (get frequency task)),
+                    status: "completed"
+                })))
+            ERR-NOT-AUTHORIZED)))
+
+(define-read-only (get-maintenance-task (property principal) (task-id uint))
+    (map-get? maintenance-schedule { property: property, task-id: task-id }))
