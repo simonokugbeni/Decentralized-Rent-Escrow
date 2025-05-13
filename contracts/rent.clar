@@ -682,3 +682,149 @@
 
 (define-read-only (get-maintenance-task (property principal) (task-id uint))
     (map-get? maintenance-schedule { property: property, task-id: task-id }))
+
+
+
+
+(define-map payment-reminders
+    principal
+    {
+        days-before: uint,
+        last-reminder: uint,
+        enabled: bool
+    }
+)
+
+(define-map reminder-status
+    { property: principal, tenant: principal }
+    {
+        next-due-date: uint,
+        reminded: bool
+    }
+)
+
+(define-public (set-payment-reminder (days-before uint))
+    (ok (map-set payment-reminders tx-sender
+        {
+            days-before: days-before,
+            last-reminder: u0,
+            enabled: true
+        })))
+
+(define-public (check-payment-reminders (landlord principal))
+    (let (
+        (property (unwrap! (map-get? properties landlord) (err u103)))
+        (reminder-config (unwrap! (map-get? payment-reminders landlord) (err u113)))
+        (current-height stacks-block-height)
+    )
+        (if (get enabled reminder-config)
+            (ok (map-set reminder-status
+                { property: landlord, tenant: tx-sender }
+                {
+                    next-due-date: (+ current-height (get days-before reminder-config)),
+                    reminded: false
+                }))
+            (err u114))))
+
+(define-read-only (get-reminder-status (landlord principal) (tenant principal))
+    (map-get? reminder-status { property: landlord, tenant: tenant }))
+
+
+(define-map lease-agreements
+    { property: principal, tenant: principal }
+    {
+        terms: (string-ascii 1024),
+        landlord-signed: bool,
+        tenant-signed: bool,
+        created-at: uint,
+        agreement-hash: (buff 32)
+    }
+)
+
+
+(define-public (sign-lease-agreement (landlord principal))
+    (let (
+        (agreement (unwrap! (map-get? lease-agreements { property: landlord, tenant: tx-sender }) (err u115)))
+    )
+        (ok (map-set lease-agreements
+            { property: landlord, tenant: tx-sender }
+            (merge agreement { tenant-signed: true })))))
+
+(define-read-only (get-lease-agreement (landlord principal) (tenant principal))
+    (map-get? lease-agreements { property: landlord, tenant: tenant }))
+
+
+
+    (define-map tenant-history
+    principal
+    {
+        total-properties: uint,
+        total-rent-paid: uint,
+        on-time-payments: uint,
+        late-payments: uint,
+        maintenance-score: uint,
+        active-since: uint,
+        reputation-score: uint
+    }
+)
+
+(define-map tenant-reviews
+    { tenant: principal, landlord: principal }
+    {
+        rating: uint,
+        payment-behavior: uint,
+        property-care: uint,
+        review-text: (string-ascii 256),
+        timestamp: uint
+    }
+)
+
+(define-public (initialize-tenant-history)
+    (ok (map-set tenant-history tx-sender
+        {
+            total-properties: u0,
+            total-rent-paid: u0,
+            on-time-payments: u0,
+            late-payments: u0,
+            maintenance-score: u100,
+            active-since: stacks-block-height,
+            reputation-score: u0
+        })))
+
+(define-public (add-tenant-review (tenant principal) 
+    (rating uint) 
+    (payment-behavior uint) 
+    (property-care uint) 
+    (review-text (string-ascii 256)))
+    (let (
+        (property (unwrap! (map-get? properties tx-sender) (err u103)))
+        (tenant-record (default-to {
+            total-properties: u0,
+            total-rent-paid: u0,
+            on-time-payments: u0,
+            late-payments: u0,
+            maintenance-score: u100,
+            active-since: stacks-block-height,
+            reputation-score: u0
+        } (map-get? tenant-history tenant)))
+    )
+        (begin
+            (map-set tenant-reviews
+                { tenant: tenant, landlord: tx-sender }
+                {
+                    rating: rating,
+                    payment-behavior: payment-behavior,
+                    property-care: property-care,
+                    review-text: review-text,
+                    timestamp: stacks-block-height
+                })
+            (ok (map-set tenant-history tenant
+                (merge tenant-record {
+                    reputation-score: (/ (+ (* (get reputation-score tenant-record) u9) rating) u10)
+                }))))))
+
+(define-read-only (get-tenant-reputation (tenant principal))
+    (map-get? tenant-history tenant))
+
+(define-read-only (get-tenant-review (tenant principal) (landlord principal))
+    (map-get? tenant-reviews { tenant: tenant, landlord: landlord }))
