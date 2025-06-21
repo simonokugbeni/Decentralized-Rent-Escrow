@@ -828,3 +828,192 @@
 
 (define-read-only (get-tenant-review (tenant principal) (landlord principal))
     (map-get? tenant-reviews { tenant: tenant, landlord: landlord }))
+
+
+(define-map disputes
+    { dispute-id: uint }
+    {
+        landlord: principal,
+        tenant: principal,
+        dispute-type: (string-ascii 32),
+        description: (string-ascii 512),
+        amount-disputed: uint,
+        status: (string-ascii 20),
+        created-at: uint,
+        resolved-at: uint,
+        resolution: (string-ascii 512)
+    }
+)
+
+(define-map arbitrators
+    principal
+    {
+        active: bool,
+        cases-handled: uint,
+        success-rate: uint,
+        stake-amount: uint,
+        registered-at: uint
+    }
+)
+
+(define-map dispute-assignments
+    { dispute-id: uint }
+    {
+        arbitrator1: principal,
+        arbitrator2: principal,
+        arbitrator3: principal,
+        vote1: (optional bool),
+        vote2: (optional bool),
+        vote3: (optional bool),
+        voting-deadline: uint
+    }
+)
+
+(define-map arbitrator-stakes principal uint)
+
+(define-data-var dispute-id-counter uint u0)
+(define-data-var arbitrator-stake-required uint u1000)
+
+(define-constant ERR-DISPUTE-NOT-FOUND (err u200))
+(define-constant ERR-NOT-ARBITRATOR (err u201))
+(define-constant ERR-VOTING-CLOSED (err u202))
+(define-constant ERR-INSUFFICIENT-STAKE (err u203))
+(define-constant ERR-ALREADY-VOTED (err u204))
+(define-constant ERR-NOT-PARTY-TO-DISPUTE (err u205))
+
+(define-public (register-arbitrator)
+    (let (
+        (stake-required (var-get arbitrator-stake-required))
+    )
+        (begin
+            (try! (stx-transfer? stake-required tx-sender (as-contract tx-sender)))
+            (map-set arbitrator-stakes tx-sender stake-required)
+            (ok (map-set arbitrators tx-sender
+                {
+                    active: true,
+                    cases-handled: u0,
+                    success-rate: u100,
+                    stake-amount: stake-required,
+                    registered-at: stacks-block-height
+                })))))
+
+(define-public (create-dispute 
+    (counterparty principal)
+    (dispute-type (string-ascii 32))
+    (description (string-ascii 512))
+    (amount-disputed uint))
+    (let (
+        (new-dispute-id (+ (var-get dispute-id-counter) u1))
+        (property-check (map-get? properties tx-sender))
+        (tenant-check (map-get? properties counterparty))
+    )
+        (begin
+            (asserts! (or (is-some property-check) (is-some tenant-check)) ERR-NOT-PARTY-TO-DISPUTE)
+            (var-set dispute-id-counter new-dispute-id)
+            (ok (map-set disputes
+                { dispute-id: new-dispute-id }
+                {
+                    landlord: (if (is-some property-check) tx-sender counterparty),
+                    tenant: (if (is-some property-check) counterparty tx-sender),
+                    dispute-type: dispute-type,
+                    description: description,
+                    amount-disputed: amount-disputed,
+                    status: "open",
+                    created-at: stacks-block-height,
+                    resolved-at: u0,
+                    resolution: ""
+                })))))
+
+(define-public (assign-arbitrators (dispute-id uint) (arb1 principal) (arb2 principal) (arb3 principal))
+    (let (
+        (dispute (unwrap! (map-get? disputes { dispute-id: dispute-id }) ERR-DISPUTE-NOT-FOUND))
+        (arbitrator1 (unwrap! (map-get? arbitrators arb1) ERR-NOT-ARBITRATOR))
+        (arbitrator2 (unwrap! (map-get? arbitrators arb2) ERR-NOT-ARBITRATOR))
+        (arbitrator3 (unwrap! (map-get? arbitrators arb3) ERR-NOT-ARBITRATOR))
+    )
+        (begin
+            (asserts! (get active arbitrator1) ERR-NOT-ARBITRATOR)
+            (asserts! (get active arbitrator2) ERR-NOT-ARBITRATOR)
+            (asserts! (get active arbitrator3) ERR-NOT-ARBITRATOR)
+            (ok (map-set dispute-assignments
+                { dispute-id: dispute-id }
+                {
+                    arbitrator1: arb1,
+                    arbitrator2: arb2,
+                    arbitrator3: arb3,
+                    vote1: none,
+                    vote2: none,
+                    vote3: none,
+                    voting-deadline: (+ stacks-block-height u144)
+                })))))
+
+(define-public (cast-arbitrator-vote (dispute-id uint) (vote-for-landlord bool))
+    (let (
+        (assignment (unwrap! (map-get? dispute-assignments { dispute-id: dispute-id }) ERR-DISPUTE-NOT-FOUND))
+        (current-height stacks-block-height)
+    )
+        (begin
+            (asserts! (< current-height (get voting-deadline assignment)) ERR-VOTING-CLOSED)
+            (if (is-eq tx-sender (get arbitrator1 assignment))
+                (begin
+                    (asserts! (is-none (get vote1 assignment)) ERR-ALREADY-VOTED)
+                    (ok (map-set dispute-assignments
+                        { dispute-id: dispute-id }
+                        (merge assignment { vote1: (some vote-for-landlord) }))))
+                (if (is-eq tx-sender (get arbitrator2 assignment))
+                    (begin
+                        (asserts! (is-none (get vote2 assignment)) ERR-ALREADY-VOTED)
+                        (ok (map-set dispute-assignments
+                            { dispute-id: dispute-id }
+                            (merge assignment { vote2: (some vote-for-landlord) }))))
+                    (if (is-eq tx-sender (get arbitrator3 assignment))
+                        (begin
+                            (asserts! (is-none (get vote3 assignment)) ERR-ALREADY-VOTED)
+                            (ok (map-set dispute-assignments
+                                { dispute-id: dispute-id }
+                                (merge assignment { vote3: (some vote-for-landlord) }))))
+                        ERR-NOT-ARBITRATOR))))))
+
+(define-public (resolve-dispute (dispute-id uint))
+    (let (
+        (dispute (unwrap! (map-get? disputes { dispute-id: dispute-id }) ERR-DISPUTE-NOT-FOUND))
+        (assignment (unwrap! (map-get? dispute-assignments { dispute-id: dispute-id }) ERR-DISPUTE-NOT-FOUND))
+        (vote1 (get vote1 assignment))
+        (vote2 (get vote2 assignment))
+        (vote3 (get vote3 assignment))
+        (landlord-votes (+ 
+            (if (is-eq vote1 (some true)) u1 u0)
+            (+ (if (is-eq vote2 (some true)) u1 u0)
+               (if (is-eq vote3 (some true)) u1 u0))))
+        (tenant-votes (+ 
+            (if (is-eq vote1 (some false)) u1 u0)
+            (+ (if (is-eq vote2 (some false)) u1 u0)
+               (if (is-eq vote3 (some false)) u1 u0))))
+        (landlord-wins (> landlord-votes tenant-votes))
+        (disputed-amount (get amount-disputed dispute))
+    )
+        (begin
+            (if landlord-wins
+                (try! (as-contract (stx-transfer? disputed-amount tx-sender (get landlord dispute))))
+                (try! (as-contract (stx-transfer? disputed-amount tx-sender (get tenant dispute)))))
+            (ok (map-set disputes
+                { dispute-id: dispute-id }
+                (merge dispute {
+                    status: "resolved",
+                    resolved-at: stacks-block-height,
+                    resolution: (if landlord-wins "landlord-favor" "tenant-favor")
+                }))))))
+
+(define-read-only (get-dispute-details (dispute-id uint))
+    (map-get? disputes { dispute-id: dispute-id }))
+
+(define-read-only (get-dispute-assignment (dispute-id uint))
+    (map-get? dispute-assignments { dispute-id: dispute-id }))
+
+(define-read-only (get-arbitrator-info (arbitrator principal))
+    (map-get? arbitrators arbitrator))
+
+(define-read-only (is-arbitrator (user principal))
+    (match (map-get? arbitrators user)
+        arbitrator-info (get active arbitrator-info)
+        false))
