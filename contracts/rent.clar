@@ -206,3 +206,814 @@
     )
         (ok (map-set landlord-properties tx-sender
             (unwrap-panic (as-max-len? (append current-properties property-id) u20))))))
+
+
+;; Add to Data Maps
+(define-map property-inspections
+    { property: principal, inspection-id: uint }
+    {
+        inspector: principal,
+        date: uint,
+        passed: bool,
+        notes: (string-ascii 256)
+    }
+)
+
+(define-data-var inspection-counter uint u0)
+
+;; Request inspection function
+(define-public (request-inspection (landlord principal) (notes (string-ascii 256)))
+    (let (
+        (property (unwrap! (map-get? properties landlord) (err u103)))
+        (inspection-id (+ (var-get inspection-counter) u1))
+    )
+        (if (is-eq (some tx-sender) (get tenant property))
+            (begin
+                (var-set inspection-counter inspection-id)
+                (ok (map-set property-inspections
+                    { property: landlord, inspection-id: inspection-id }
+                    {
+                        inspector: landlord,
+                        date: stacks-block-height,
+                        passed: false,
+                        notes: notes
+                    })))
+            ERR-NOT-AUTHORIZED)))
+
+;; Record inspection results
+(define-public (record-inspection-result (inspection-id uint) (passed bool) (notes (string-ascii 256)))
+    (let (
+        (inspection (unwrap! (map-get? property-inspections { property: tx-sender, inspection-id: inspection-id }) (err u104)))
+    )
+        (ok (map-set property-inspections
+            { property: tx-sender, inspection-id: inspection-id }
+            (merge inspection { passed: passed, notes: notes })))))
+
+;; Get inspection details
+(define-read-only (get-inspection-details (property principal) (inspection-id uint))
+    (map-get? property-inspections { property: property, inspection-id: inspection-id }))
+
+
+;; Add to Data Maps
+(define-map rent-increases
+    { property: principal, increase-id: uint }
+    {
+        current-amount: uint,
+        new-amount: uint,
+        effective-date: uint,
+        acknowledged: bool
+    }
+)
+
+(define-data-var increase-counter uint u0)
+
+;; Propose rent increase
+(define-public (propose-rent-increase (new-amount uint) (effective-block-height uint))
+    (let (
+        (property (unwrap! (map-get? properties tx-sender) (err u103)))
+        (increase-id (+ (var-get increase-counter) u1))
+        (current-amount (get rent-amount property))
+    )
+        (begin
+            (var-set increase-counter increase-id)
+            (ok (map-set rent-increases
+                { property: tx-sender, increase-id: increase-id }
+                {
+                    current-amount: current-amount,
+                    new-amount: new-amount,
+                    effective-date: effective-block-height,
+                    acknowledged: false
+                })))))
+
+;; Acknowledge rent increase
+(define-public (acknowledge-rent-increase (landlord principal) (increase-id uint))
+    (let (
+        (property (unwrap! (map-get? properties landlord) (err u103)))
+        (increase (unwrap! (map-get? rent-increases { property: landlord, increase-id: increase-id }) (err u105)))
+    )
+        (if (is-eq (some tx-sender) (get tenant property))
+            (begin
+                (map-set rent-increases
+                    { property: landlord, increase-id: increase-id }
+                    (merge increase { acknowledged: true }))
+                
+                ;; Update rent amount if effective date has passed
+                (if (>= stacks-block-height (get effective-date increase))
+                    (map-set properties landlord
+                        (merge property { rent-amount: (get new-amount increase) }))
+                    true)
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+;; Get rent increase details
+(define-read-only (get-rent-increase (property principal) (increase-id uint))
+    (map-get? rent-increases { property: property, increase-id: increase-id }))
+
+
+;; Add to Data Maps
+(define-map sublet-requests
+    { property: principal, request-id: uint }
+    {
+        tenant: principal,
+        subtenant: principal,
+        start-date: uint,
+        end-date: uint,
+        status: (string-ascii 20),
+        notes: (string-ascii 256)
+    }
+)
+
+(define-data-var sublet-counter uint u0)
+
+;; Request subletting
+(define-public (request-sublet (landlord principal) (subtenant principal) (start-date uint) (end-date uint) (notes (string-ascii 256)))
+    (let (
+        (property (unwrap! (map-get? properties landlord) (err u103)))
+        (request-id (+ (var-get sublet-counter) u1))
+    )
+        (if (is-eq (some tx-sender) (get tenant property))
+            (begin
+                (var-set sublet-counter request-id)
+                (ok (map-set sublet-requests
+                    { property: landlord, request-id: request-id }
+                    {
+                        tenant: tx-sender,
+                        subtenant: subtenant,
+                        start-date: start-date,
+                        end-date: end-date,
+                        status: "pending",
+                        notes: notes
+                    })))
+            ERR-NOT-AUTHORIZED)))
+
+;; Approve or deny sublet request
+(define-public (respond-to-sublet (request-id uint) (approve bool) (notes (string-ascii 256)))
+    (let (
+        (request (unwrap! (map-get? sublet-requests { property: tx-sender, request-id: request-id }) (err u106)))
+        (status (if approve "approved" "denied"))
+    )
+        (ok (map-set sublet-requests
+            { property: tx-sender, request-id: request-id }
+            (merge request { status: status, notes: notes })))))
+
+;; Get sublet request details
+(define-read-only (get-sublet-request (property principal) (request-id uint))
+    (map-get? sublet-requests { property: property, request-id: request-id }))
+
+
+;; Add to Data Maps
+(define-map lease-terms
+    principal
+    {
+        start-date: uint,
+        end-date: uint,
+        auto-renew: bool,
+        renewal-term: uint,
+        renewal-notice-period: uint
+    }
+)
+
+(define-map renewal-offers
+    { property: principal, offer-id: uint }
+    {
+        new-end-date: uint,
+        new-rent-amount: uint,
+        offered-at: uint,
+        expires-at: uint,
+        status: (string-ascii 20)
+    }
+)
+
+(define-data-var renewal-counter uint u0)
+
+;; Set initial lease terms
+(define-public (set-lease-terms (start-date uint) (end-date uint) (auto-renew bool) (renewal-term uint) (renewal-notice-period uint))
+    (let ((sender tx-sender))
+        (ok (map-set lease-terms sender
+            {
+                start-date: start-date,
+                end-date: end-date,
+                auto-renew: auto-renew,
+                renewal-term: renewal-term,
+                renewal-notice-period: renewal-notice-period
+            }))))
+
+;; Offer lease renewal
+(define-public (offer-renewal (new-end-date uint) (new-rent-amount uint) (expires-at uint))
+    (let (
+        (property (unwrap! (map-get? properties tx-sender) (err u103)))
+        (offer-id (+ (var-get renewal-counter) u1))
+    )
+        (begin
+            (var-set renewal-counter offer-id)
+            (ok (map-set renewal-offers
+                { property: tx-sender, offer-id: offer-id }
+                {
+                    new-end-date: new-end-date,
+                    new-rent-amount: new-rent-amount,
+                    offered-at: stacks-block-height,
+                    expires-at: expires-at,
+                    status: "offered"
+                })))))
+
+;; Accept renewal offer
+(define-public (accept-renewal (landlord principal) (offer-id uint))
+    (let (
+        (property (unwrap! (map-get? properties landlord) (err u103)))
+        (offer (unwrap! (map-get? renewal-offers { property: landlord, offer-id: offer-id }) (err u107)))
+        (lease (unwrap! (map-get? lease-terms landlord) (err u108)))
+    )
+        (if (and (is-eq (some tx-sender) (get tenant property)) (< stacks-block-height (get expires-at offer)))
+            (begin
+                ;; Update lease terms
+                (map-set lease-terms landlord
+                    (merge lease { end-date: (get new-end-date offer) }))
+                
+                ;; Update rent amount
+                (map-set properties landlord
+                    (merge property { rent-amount: (get new-rent-amount offer) }))
+                
+                ;; Update offer status
+                (map-set renewal-offers
+                    { property: landlord, offer-id: offer-id }
+                    (merge offer { status: "accepted" }))
+                
+                (ok true))
+            ERR-NOT-AUTHORIZED)))
+
+;; Get lease terms
+(define-read-only (get-lease-terms (property principal))
+    (map-get? lease-terms property))
+
+;; Get renewal offer
+(define-read-only (get-renewal-offer (property principal) (offer-id uint))
+    (map-get? renewal-offers { property: property, offer-id: offer-id }))
+
+
+
+;; Add to Data Maps
+(define-map utility-payments
+    { property: principal, payment-id: uint }
+    {
+        utility-type: (string-ascii 20),
+        amount: uint,
+        due-date: uint,
+        paid-date: uint,
+        paid: bool
+    }
+)
+
+(define-data-var utility-counter uint u0)
+
+;; Add utility bill
+(define-public (add-utility-bill (utility-type (string-ascii 20)) (amount uint) (due-date uint))
+    (let (
+        (property (unwrap! (map-get? properties tx-sender) (err u103)))
+        (payment-id (+ (var-get utility-counter) u1))
+    )
+        (begin
+            (var-set utility-counter payment-id)
+            (ok (map-set utility-payments
+                { property: tx-sender, payment-id: payment-id }
+                {
+                    utility-type: utility-type,
+                    amount: amount,
+                    due-date: due-date,
+                    paid-date: u0,
+                    paid: false
+                })))))
+
+;; Pay utility bill
+(define-public (pay-utility-bill (landlord principal) (payment-id uint))
+    (let (
+        (property (unwrap! (map-get? properties landlord) (err u103)))
+        (utility (unwrap! (map-get? utility-payments { property: landlord, payment-id: payment-id }) (err u109)))
+        (payment (get amount utility))
+    )
+        (if (is-eq (some tx-sender) (get tenant property))
+            (begin
+                (try! (stx-transfer? payment tx-sender landlord))
+                (ok (map-set utility-payments
+                    { property: landlord, payment-id: payment-id }
+                    (merge utility { paid: true, paid-date: stacks-block-height }))))
+            ERR-NOT-AUTHORIZED)))
+
+;; Get utility payment details
+(define-read-only (get-utility-payment (property principal) (payment-id uint))
+    (map-get? utility-payments { property: property, payment-id: payment-id }))
+
+;; Get all utility payments for a property
+(define-read-only (get-property-utilities (property principal))
+    (map-get? utility-payments { property: property, payment-id: u0 }))
+
+
+
+;; Add to Data Maps
+(define-map security-deposits
+    principal
+    {
+        amount: uint,
+        paid-date: uint,
+        returned: bool,
+        return-date: uint
+    }
+)
+
+(define-map deposit-deductions
+    { property: principal, deduction-id: uint }
+    {
+        amount: uint,
+        reason: (string-ascii 256),
+        evidence: (string-ascii 256),
+        disputed: bool
+    }
+)
+
+(define-data-var deduction-counter uint u0)
+
+;; Pay security deposit
+(define-public (pay-security-deposit (landlord principal))
+    (let (
+        (property (unwrap! (map-get? properties landlord) (err u103)))
+        (deposit-amount (get deposit property))
+    )
+        (if (is-eq (some tx-sender) (get tenant property))
+            (begin
+                (try! (stx-transfer? deposit-amount tx-sender landlord))
+                (ok (map-set security-deposits landlord
+                    {
+                        amount: deposit-amount,
+                        paid-date: stacks-block-height,
+                        returned: false,
+                        return-date: u0
+                    })))
+            ERR-NOT-AUTHORIZED)))
+
+;; Add deposit deduction
+(define-public (add-deposit-deduction (tenant principal) (amount uint) (reason (string-ascii 256)) (evidence (string-ascii 256)))
+    (let (
+        (property (unwrap! (map-get? properties tx-sender) (err u103)))
+        (deduction-id (+ (var-get deduction-counter) u1))
+    )
+        (if (is-eq (some tenant) (get tenant property))
+            (begin
+                (var-set deduction-counter deduction-id)
+                (ok (map-set deposit-deductions
+                    { property: tx-sender, deduction-id: deduction-id }
+                    {
+                        amount: amount,
+                        reason: reason,
+                        evidence: evidence,
+                        disputed: false
+                    })))
+            ERR-NOT-AUTHORIZED)))
+
+;; Dispute deposit deduction
+(define-public (dispute-deduction (landlord principal) (deduction-id uint))
+    (let (
+        (property (unwrap! (map-get? properties landlord) (err u103)))
+        (deduction (unwrap! (map-get? deposit-deductions { property: landlord, deduction-id: deduction-id }) (err u110)))
+    )
+        (if (is-eq (some tx-sender) (get tenant property))
+            (ok (map-set deposit-deductions
+                { property: landlord, deduction-id: deduction-id }
+                (merge deduction { disputed: true })))
+            ERR-NOT-AUTHORIZED)))
+
+
+
+
+(define-map insurance-policies
+    principal 
+    {
+        required: bool,
+        coverage-amount: uint,
+        expiry-date: uint,
+        insurance-provider: (string-ascii 64),
+        policy-number: (string-ascii 32),
+        verified: bool
+    }
+)
+
+(define-public (set-insurance-requirement (coverage-amount uint))
+    (let ((sender tx-sender))
+        (ok (map-set insurance-policies sender
+            {
+                required: true,
+                coverage-amount: coverage-amount,
+                expiry-date: u0,
+                insurance-provider: "",
+                policy-number: "",
+                verified: false
+            }))))
+
+(define-public (submit-insurance-proof 
+    (landlord principal)
+    (expiry-date uint)
+    (provider (string-ascii 64))
+    (policy-number (string-ascii 32)))
+    (let (
+        (property (unwrap! (map-get? properties landlord) (err u103)))
+        (insurance (unwrap! (map-get? insurance-policies landlord) (err u111)))
+    )
+        (if (is-eq (some tx-sender) (get tenant property))
+            (ok (map-set insurance-policies landlord
+                (merge insurance {
+                    expiry-date: expiry-date,
+                    insurance-provider: provider,
+                    policy-number: policy-number
+                })))
+            ERR-NOT-AUTHORIZED)))
+
+(define-read-only (get-insurance-details (property principal))
+    (map-get? insurance-policies property))
+
+
+
+(define-map maintenance-schedule
+    { property: principal, task-id: uint }
+    {
+        task-name: (string-ascii 64),
+        frequency: uint,
+        last-completed: uint,
+        next-due: uint,
+        assigned-to: principal,
+        status: (string-ascii 20)
+    }
+)
+
+(define-data-var task-counter uint u0)
+
+(define-public (schedule-maintenance-task 
+    (task-name (string-ascii 64))
+    (frequency uint)
+    (assigned-to principal))
+    (let (
+        (task-id (+ (var-get task-counter) u1))
+        (current-height stacks-block-height)
+    )
+        (begin
+            (var-set task-counter task-id)
+            (ok (map-set maintenance-schedule
+                { property: tx-sender, task-id: task-id }
+                {
+                    task-name: task-name,
+                    frequency: frequency,
+                    last-completed: current-height,
+                    next-due: (+ current-height frequency),
+                    assigned-to: assigned-to,
+                    status: "scheduled"
+                })))))
+
+(define-public (complete-maintenance-task (property principal) (task-id uint))
+    (let (
+        (task (unwrap! (map-get? maintenance-schedule { property: property, task-id: task-id }) (err u112)))
+        (current-height stacks-block-height)
+    )
+        (if (is-eq tx-sender (get assigned-to task))
+            (ok (map-set maintenance-schedule
+                { property: property, task-id: task-id }
+                (merge task {
+                    last-completed: current-height,
+                    next-due: (+ current-height (get frequency task)),
+                    status: "completed"
+                })))
+            ERR-NOT-AUTHORIZED)))
+
+(define-read-only (get-maintenance-task (property principal) (task-id uint))
+    (map-get? maintenance-schedule { property: property, task-id: task-id }))
+
+
+
+
+(define-map payment-reminders
+    principal
+    {
+        days-before: uint,
+        last-reminder: uint,
+        enabled: bool
+    }
+)
+
+(define-map reminder-status
+    { property: principal, tenant: principal }
+    {
+        next-due-date: uint,
+        reminded: bool
+    }
+)
+
+(define-public (set-payment-reminder (days-before uint))
+    (ok (map-set payment-reminders tx-sender
+        {
+            days-before: days-before,
+            last-reminder: u0,
+            enabled: true
+        })))
+
+(define-public (check-payment-reminders (landlord principal))
+    (let (
+        (property (unwrap! (map-get? properties landlord) (err u103)))
+        (reminder-config (unwrap! (map-get? payment-reminders landlord) (err u113)))
+        (current-height stacks-block-height)
+    )
+        (if (get enabled reminder-config)
+            (ok (map-set reminder-status
+                { property: landlord, tenant: tx-sender }
+                {
+                    next-due-date: (+ current-height (get days-before reminder-config)),
+                    reminded: false
+                }))
+            (err u114))))
+
+(define-read-only (get-reminder-status (landlord principal) (tenant principal))
+    (map-get? reminder-status { property: landlord, tenant: tenant }))
+
+
+(define-map lease-agreements
+    { property: principal, tenant: principal }
+    {
+        terms: (string-ascii 1024),
+        landlord-signed: bool,
+        tenant-signed: bool,
+        created-at: uint,
+        agreement-hash: (buff 32)
+    }
+)
+
+
+(define-public (sign-lease-agreement (landlord principal))
+    (let (
+        (agreement (unwrap! (map-get? lease-agreements { property: landlord, tenant: tx-sender }) (err u115)))
+    )
+        (ok (map-set lease-agreements
+            { property: landlord, tenant: tx-sender }
+            (merge agreement { tenant-signed: true })))))
+
+(define-read-only (get-lease-agreement (landlord principal) (tenant principal))
+    (map-get? lease-agreements { property: landlord, tenant: tenant }))
+
+
+
+    (define-map tenant-history
+    principal
+    {
+        total-properties: uint,
+        total-rent-paid: uint,
+        on-time-payments: uint,
+        late-payments: uint,
+        maintenance-score: uint,
+        active-since: uint,
+        reputation-score: uint
+    }
+)
+
+(define-map tenant-reviews
+    { tenant: principal, landlord: principal }
+    {
+        rating: uint,
+        payment-behavior: uint,
+        property-care: uint,
+        review-text: (string-ascii 256),
+        timestamp: uint
+    }
+)
+
+(define-public (initialize-tenant-history)
+    (ok (map-set tenant-history tx-sender
+        {
+            total-properties: u0,
+            total-rent-paid: u0,
+            on-time-payments: u0,
+            late-payments: u0,
+            maintenance-score: u100,
+            active-since: stacks-block-height,
+            reputation-score: u0
+        })))
+
+(define-public (add-tenant-review (tenant principal) 
+    (rating uint) 
+    (payment-behavior uint) 
+    (property-care uint) 
+    (review-text (string-ascii 256)))
+    (let (
+        (property (unwrap! (map-get? properties tx-sender) (err u103)))
+        (tenant-record (default-to {
+            total-properties: u0,
+            total-rent-paid: u0,
+            on-time-payments: u0,
+            late-payments: u0,
+            maintenance-score: u100,
+            active-since: stacks-block-height,
+            reputation-score: u0
+        } (map-get? tenant-history tenant)))
+    )
+        (begin
+            (map-set tenant-reviews
+                { tenant: tenant, landlord: tx-sender }
+                {
+                    rating: rating,
+                    payment-behavior: payment-behavior,
+                    property-care: property-care,
+                    review-text: review-text,
+                    timestamp: stacks-block-height
+                })
+            (ok (map-set tenant-history tenant
+                (merge tenant-record {
+                    reputation-score: (/ (+ (* (get reputation-score tenant-record) u9) rating) u10)
+                }))))))
+
+(define-read-only (get-tenant-reputation (tenant principal))
+    (map-get? tenant-history tenant))
+
+(define-read-only (get-tenant-review (tenant principal) (landlord principal))
+    (map-get? tenant-reviews { tenant: tenant, landlord: landlord }))
+
+
+(define-map disputes
+    { dispute-id: uint }
+    {
+        landlord: principal,
+        tenant: principal,
+        dispute-type: (string-ascii 32),
+        description: (string-ascii 512),
+        amount-disputed: uint,
+        status: (string-ascii 20),
+        created-at: uint,
+        resolved-at: uint,
+        resolution: (string-ascii 512)
+    }
+)
+
+(define-map arbitrators
+    principal
+    {
+        active: bool,
+        cases-handled: uint,
+        success-rate: uint,
+        stake-amount: uint,
+        registered-at: uint
+    }
+)
+
+(define-map dispute-assignments
+    { dispute-id: uint }
+    {
+        arbitrator1: principal,
+        arbitrator2: principal,
+        arbitrator3: principal,
+        vote1: (optional bool),
+        vote2: (optional bool),
+        vote3: (optional bool),
+        voting-deadline: uint
+    }
+)
+
+(define-map arbitrator-stakes principal uint)
+
+(define-data-var dispute-id-counter uint u0)
+(define-data-var arbitrator-stake-required uint u1000)
+
+(define-constant ERR-DISPUTE-NOT-FOUND (err u200))
+(define-constant ERR-NOT-ARBITRATOR (err u201))
+(define-constant ERR-VOTING-CLOSED (err u202))
+(define-constant ERR-INSUFFICIENT-STAKE (err u203))
+(define-constant ERR-ALREADY-VOTED (err u204))
+(define-constant ERR-NOT-PARTY-TO-DISPUTE (err u205))
+
+(define-public (register-arbitrator)
+    (let (
+        (stake-required (var-get arbitrator-stake-required))
+    )
+        (begin
+            (try! (stx-transfer? stake-required tx-sender (as-contract tx-sender)))
+            (map-set arbitrator-stakes tx-sender stake-required)
+            (ok (map-set arbitrators tx-sender
+                {
+                    active: true,
+                    cases-handled: u0,
+                    success-rate: u100,
+                    stake-amount: stake-required,
+                    registered-at: stacks-block-height
+                })))))
+
+(define-public (create-dispute 
+    (counterparty principal)
+    (dispute-type (string-ascii 32))
+    (description (string-ascii 512))
+    (amount-disputed uint))
+    (let (
+        (new-dispute-id (+ (var-get dispute-id-counter) u1))
+        (property-check (map-get? properties tx-sender))
+        (tenant-check (map-get? properties counterparty))
+    )
+        (begin
+            (asserts! (or (is-some property-check) (is-some tenant-check)) ERR-NOT-PARTY-TO-DISPUTE)
+            (var-set dispute-id-counter new-dispute-id)
+            (ok (map-set disputes
+                { dispute-id: new-dispute-id }
+                {
+                    landlord: (if (is-some property-check) tx-sender counterparty),
+                    tenant: (if (is-some property-check) counterparty tx-sender),
+                    dispute-type: dispute-type,
+                    description: description,
+                    amount-disputed: amount-disputed,
+                    status: "open",
+                    created-at: stacks-block-height,
+                    resolved-at: u0,
+                    resolution: ""
+                })))))
+
+(define-public (assign-arbitrators (dispute-id uint) (arb1 principal) (arb2 principal) (arb3 principal))
+    (let (
+        (dispute (unwrap! (map-get? disputes { dispute-id: dispute-id }) ERR-DISPUTE-NOT-FOUND))
+        (arbitrator1 (unwrap! (map-get? arbitrators arb1) ERR-NOT-ARBITRATOR))
+        (arbitrator2 (unwrap! (map-get? arbitrators arb2) ERR-NOT-ARBITRATOR))
+        (arbitrator3 (unwrap! (map-get? arbitrators arb3) ERR-NOT-ARBITRATOR))
+    )
+        (begin
+            (asserts! (get active arbitrator1) ERR-NOT-ARBITRATOR)
+            (asserts! (get active arbitrator2) ERR-NOT-ARBITRATOR)
+            (asserts! (get active arbitrator3) ERR-NOT-ARBITRATOR)
+            (ok (map-set dispute-assignments
+                { dispute-id: dispute-id }
+                {
+                    arbitrator1: arb1,
+                    arbitrator2: arb2,
+                    arbitrator3: arb3,
+                    vote1: none,
+                    vote2: none,
+                    vote3: none,
+                    voting-deadline: (+ stacks-block-height u144)
+                })))))
+
+(define-public (cast-arbitrator-vote (dispute-id uint) (vote-for-landlord bool))
+    (let (
+        (assignment (unwrap! (map-get? dispute-assignments { dispute-id: dispute-id }) ERR-DISPUTE-NOT-FOUND))
+        (current-height stacks-block-height)
+    )
+        (begin
+            (asserts! (< current-height (get voting-deadline assignment)) ERR-VOTING-CLOSED)
+            (if (is-eq tx-sender (get arbitrator1 assignment))
+                (begin
+                    (asserts! (is-none (get vote1 assignment)) ERR-ALREADY-VOTED)
+                    (ok (map-set dispute-assignments
+                        { dispute-id: dispute-id }
+                        (merge assignment { vote1: (some vote-for-landlord) }))))
+                (if (is-eq tx-sender (get arbitrator2 assignment))
+                    (begin
+                        (asserts! (is-none (get vote2 assignment)) ERR-ALREADY-VOTED)
+                        (ok (map-set dispute-assignments
+                            { dispute-id: dispute-id }
+                            (merge assignment { vote2: (some vote-for-landlord) }))))
+                    (if (is-eq tx-sender (get arbitrator3 assignment))
+                        (begin
+                            (asserts! (is-none (get vote3 assignment)) ERR-ALREADY-VOTED)
+                            (ok (map-set dispute-assignments
+                                { dispute-id: dispute-id }
+                                (merge assignment { vote3: (some vote-for-landlord) }))))
+                        ERR-NOT-ARBITRATOR))))))
+
+(define-public (resolve-dispute (dispute-id uint))
+    (let (
+        (dispute (unwrap! (map-get? disputes { dispute-id: dispute-id }) ERR-DISPUTE-NOT-FOUND))
+        (assignment (unwrap! (map-get? dispute-assignments { dispute-id: dispute-id }) ERR-DISPUTE-NOT-FOUND))
+        (vote1 (get vote1 assignment))
+        (vote2 (get vote2 assignment))
+        (vote3 (get vote3 assignment))
+        (landlord-votes (+ 
+            (if (is-eq vote1 (some true)) u1 u0)
+            (+ (if (is-eq vote2 (some true)) u1 u0)
+               (if (is-eq vote3 (some true)) u1 u0))))
+        (tenant-votes (+ 
+            (if (is-eq vote1 (some false)) u1 u0)
+            (+ (if (is-eq vote2 (some false)) u1 u0)
+               (if (is-eq vote3 (some false)) u1 u0))))
+        (landlord-wins (> landlord-votes tenant-votes))
+        (disputed-amount (get amount-disputed dispute))
+    )
+        (begin
+            (if landlord-wins
+                (try! (as-contract (stx-transfer? disputed-amount tx-sender (get landlord dispute))))
+                (try! (as-contract (stx-transfer? disputed-amount tx-sender (get tenant dispute)))))
+            (ok (map-set disputes
+                { dispute-id: dispute-id }
+                (merge dispute {
+                    status: "resolved",
+                    resolved-at: stacks-block-height,
+                    resolution: (if landlord-wins "landlord-favor" "tenant-favor")
+                }))))))
+
+(define-read-only (get-dispute-details (dispute-id uint))
+    (map-get? disputes { dispute-id: dispute-id }))
+
+(define-read-only (get-dispute-assignment (dispute-id uint))
+    (map-get? dispute-assignments { dispute-id: dispute-id }))
+
+(define-read-only (get-arbitrator-info (arbitrator principal))
+    (map-get? arbitrators arbitrator))
+
+(define-read-only (is-arbitrator (user principal))
+    (match (map-get? arbitrators user)
+        arbitrator-info (get active arbitrator-info)
+        false))
