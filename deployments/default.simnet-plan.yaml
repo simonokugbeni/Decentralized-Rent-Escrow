@@ -50,8 +50,18 @@ plan:
     - id: 0
       transactions:
         - emulated-contract-publish:
+            contract-name: property-analytics
+            emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+            path: "contracts\\property-analytics.clar"
+            clarity-version: 3
+        - emulated-contract-publish:
             contract-name: rent
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            path: contracts/rent.clar
+            path: "contracts\\rent.clar"
+            clarity-version: 3
+        - emulated-contract-publish:
+            contract-name: rental-rewards
+            emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+            path: "contracts\\rental-rewards.clar"
             clarity-version: 3
       epoch: "3.1"
